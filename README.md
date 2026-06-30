@@ -32,8 +32,11 @@ curl -fsSL https://raw.githubusercontent.com/Loading886/iOS-5GPN-WhatsApp-Patch/
 
 > 补丁具体详情、支持哪些 fork、安全性与自动回滚机制等完整细节,见下方英文文档。
 
+> 本项目使用Claude制作
 
 ---
+
+# 以下是项目的英文版说明，包含更多细节：
 
 # wa-universal-patch — make WhatsApp work on a 5GPN-style DNS+SNI gateway
 
