@@ -123,6 +123,20 @@ detect_firewall(){
   else FW=none; fi
 }
 
+REDIRECT_MODE="" REDIRECT_TARGET=""
+detect_redirect_mode(){
+  # "redirect-mode" gateways (e.g. mora1n/5gws) do NOT bind :443 — an nft/iptables rule redirects
+  # :443 to a hidden backend (HAProxy on :18443). Detect that so we can refuse with the right pointer.
+  [ -z "$LISTENER" ] || return 0
+  local line
+  line="$(nft list ruleset 2>/dev/null | grep -iE 'dport 443[^0-9].*(redirect|dnat)' | head -1 || true)"
+  [ -n "$line" ] || line="$(iptables -t nat -S 2>/dev/null | grep -iE 'dport 443 .*(REDIRECT|DNAT)' | head -1 || true)"
+  if [ -n "$line" ]; then
+    REDIRECT_MODE=1
+    REDIRECT_TARGET="$(printf '%s' "$line" | grep -oE '(:|to-ports )[0-9]+' | grep -oE '[0-9]+' | tail -1 || true)"
+  fi
+}
+
 DNS_SYS="" DNS_RULEFILE="" DNS_RELOAD=""
 detect_dns(){
   if systemctl is-active --quiet dnsdist 2>/dev/null; then
@@ -175,6 +189,7 @@ pick_free_port(){
 print_detection(){
   echo "────────── detection ──────────"
   printf '  %-18s %s\n' ":443 listener"  "${LISTENER:-NONE}${LISTENER_PID:+ (pid $LISTENER_PID)}"
+  [ -n "$REDIRECT_MODE" ] && printf '  %-18s %s\n' "redirect-mode"   "nft/ipt :443 -> :${REDIRECT_TARGET:-?} (no direct :443 listener — 5gws-style; NOT auto-patchable)"
   printf '  %-18s %s\n' "listener cfg"    "${LISTENER_CFG:-?}"
   printf '  %-18s %s\n' "listener svc"    "${LISTENER_SVC:-?}"
   printf '  %-18s %s\n' "firewall"        "${FW:-?}"
@@ -432,6 +447,7 @@ EOF
 mkdir -p "$STATE_DIR" "$BACKUP_DIR"
 detect_listener443
 detect_firewall
+detect_redirect_mode
 detect_dns
 detect_self_ips
 detect_client_cidr
@@ -452,9 +468,14 @@ print_detection
 # guard rails
 case "$LISTENER" in
   sniproxy|singbox) : ;;
-  haproxy) [ "$FORCE_HAPROXY" = 1 ] || warn "HAProxy/5gws detected — needs --force-haproxy (experimental)." ;;
+  haproxy) [ "$FORCE_HAPROXY" = 1 ] || warn "HAProxy is bound directly on :443 — needs --force-haproxy (experimental). NOTE: mora1n/5gws is NOT this case — it is redirect-mode (handled below)." ;;
   nginx)   die "a TLS-terminating nginx is on :443, not an SNI router — this patch would break it. Aborting." ;;
-  "" )     die "no listener on :443 — refusing to install a shim with no backend to fall open to." ;;
+  "" )     if [ -n "$REDIRECT_MODE" ]; then
+             warn "redirect-mode gateway detected: nft/iptables redirects :443 -> :${REDIRECT_TARGET:-?} to a hidden backend (e.g. mora1n/5gws -> HAProxy:18443). There is no :443 listener to relocate, so wa-universal-patch does NOT auto-patch this topology — see README -> 'Redirect-mode gateways (mora1n/5gws)' for the manual steps. (Failing safe: nothing changed.)"
+             [ "$DETECT_ONLY" = 1 ] && exit 0
+             exit 2
+           fi
+           die "no listener on :443 — refusing to install a shim with no backend to fall open to." ;;
   *)       die "unrecognized :443 listener ($LISTENER); refusing rather than risk black-holing all HTTPS." ;;
 esac
 if [ "$FW" = nft ] && nft list ruleset 2>/dev/null | grep -qi tproxy; then

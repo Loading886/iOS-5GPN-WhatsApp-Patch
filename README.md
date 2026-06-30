@@ -123,13 +123,14 @@ The shim is ~200 lines of dependency-free Python, runs as an unprivileged user, 
 | **Jaydooooooo/5GPN** | sniproxy | ✅ one-click | same as above (it's a wrapper over Xiuyixx). |
 | **lingchenfs1/5gpn** | sniproxy | ✅ one-click | same; installer **verifies** WhatsApp is hijacked and adds a DNS entry if the deployed GFWList lacks it. |
 | **misaka-cpu/privdns-gateway** | sing-box | ✅ one-click · **live-tested** | sing-box keeps the inbound port as the egress port, so it's relocated to loopback **:443** (not a new port) and the shim binds the interface IP; **adds `whatsapp.net/.com` to `unlock.txt`** (not hijacked by default). |
-| **mora1n/5gws** | HAProxy | ⚠️ `--force-haproxy` | hardest case: it already owns an nft REDIRECT on :443 and explicitly rejects no-SNI. Needs the experimental flag (auto-rollback still applies) or the manual steps below. |
+| **mora1n/5gws** | HAProxy (behind an nft redirect) | ❌ manual only | **redirect-mode**: 5gws never binds :443 — an nft rule redirects `:443 → HAProxy:18443`. There's no :443 listener to relocate, so the installer **detects this and refuses cleanly** (fails safe, nothing changed). See the manual steps below. |
 
 > **Live-tested:** the **sing-box** path (privdns-gateway) and the **sniproxy** path (lingchen/5gpn) were
 > installed via the one-liner on a real Debian 12 deployment and verified end-to-end — WhatsApp's no-SNI
 > ED/WA handshake is diverted to `g.whatsapp.net`, normal SNI fails open to the gateway, DNS is hijacked
-> for clients, and uninstall fully restores the gateway. The HAProxy/5gws path is code-reviewed but not
-> yet live-tested.
+> for clients, and uninstall fully restores the gateway. **mora1n/5gws is redirect-mode** (it never binds
+> :443 — nft redirects :443 → HAProxy:18443); the installer detects this topology and refuses cleanly, so
+> 5gws is **manual-only** (see below), not auto-patched.
 
 > The mechanism is universal; the *integration* is per-host, so the installer **detects then adapts**.
 
@@ -178,17 +179,41 @@ This patch sits in front of all of your :443, so it is built to be reversible an
   is code-reviewed but not yet live-tested. The installer self-validates with a real TLS handshake and
   auto-rolls-back, so an unforeseen difference on your box fails safe instead of breaking your HTTPS.
 
-## Manual steps for mora1n/5gws (HAProxy)
+## Redirect-mode gateways (mora1n/5gws)
 
-5gws already nat-REDIRECTs :443 to HAProxy and rejects no-SNI before backend selection, so the split
-must sit in front. Either run `sudo ./install.sh --force-haproxy` (it removes the :443→HAProxy
-REDIRECT, relocates the HAProxy bind, and puts the shim on :443, with full auto-rollback), or do it
-by hand:
+5gws is **redirect-mode**: it never binds :443. An nft rule in `table inet fivegws` does
+`iifname <iface> ip saddr <client-cidr> tcp/udp dport 443 redirect to :18443`, where HAProxy actually
+listens (tcp-mode, `reject unless has_sni`). There is **no :443 listener to relocate**, so the installer
+detects this and **fails safe** (`exit 2`, nothing changed) — it does not try to auto-patch it. Wire it
+up by hand (HAProxy stays on :18443; the shim takes the redirect's place on :443):
 
-1. Add `whatsapp.net`/`whatsapp.com` as `gateway` rules in `/etc/5gws/rules.toml`; restart `5gws-smartdns`.
-2. Remove the nft prerouting rule that redirects `tcp dport 443` to HAProxy's port.
-3. Point HAProxy's `bind` from `:443` to `127.0.0.1:<backend>`; restart `5gws-haproxy`.
-4. Run wa-shim on :443 with `WA_SHIM_BACKEND=127.0.0.1:<backend>`.
+1. **DNS** — make WhatsApp resolve to the gateway so the chat socket arrives. Add to `/etc/5gws/rules.toml`:
+   ```toml
+   [[rules]]
+   name = "whatsapp"
+   exit = "gateway"            # whatever your "send to gateway" action is named
+   domain_suffix = ["whatsapp.net", "whatsapp.com"]
+   ```
+   then `systemctl restart 5gws-smartdns`.
+2. **Remove the :443 redirect** so client :443 reaches the shim instead of HAProxy directly:
+   ```bash
+   nft -a list chain inet fivegws prerouting          # find the handle of each tcp/udp dport 443 redirect rule
+   nft delete rule inet fivegws prerouting handle <N> # repeat for the tcp and udp :443 rules
+   ```
+3. **Run the shim on :443**, forwarding non-WhatsApp to HAProxy's real port (18443). The installer refuses
+   redirect-mode, so run the daemon directly (wrap it in a systemd unit for persistence):
+   ```bash
+   sudo WA_SHIM_PORT=443 WA_SHIM_BACKEND=127.0.0.1:18443 \
+        WA_SHIM_ALLOW_CIDR=<client-cidr>,127.0.0.0/8 WA_SHIM_SELF_IPS=<gateway-ip> \
+        python3 wa-shim.py
+   ```
+   5gws's input chain is `policy accept`, so the shim on :443 gets client traffic with no extra firewall rule.
+
+> Native redirect-mode auto-support may come later; for now the installer fails safe on 5gws and points here.
+
+> **Note:** there is also an experimental `--force-haproxy` path, but it is for the *different* case of a
+> gateway that binds **HAProxy directly on :443** (none of the five forks does this; it's untested). It is
+> **not** for 5gws — 5gws is redirect-mode, handled by the manual steps above.
 
 ## Files
 
