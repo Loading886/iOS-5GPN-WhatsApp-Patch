@@ -1,45 +1,37 @@
-# iOS-5GPN-WhatsApp-Patch — 让 5GPN 类网关上的 WhatsApp 正常收发消息
+# iOS 5GPN WhatsApp-补丁 
 
-> 🇨🇳 中文说明在前;完整英文文档见下方(**English version below ↓**)。
 
-给"手机只设 DNS 就能上网"的网关(**5GPN / privdns-gateway / 5gws** 这一类)的即插补丁。这类网关能让 WhatsApp 的**通话和媒体**正常,但**消息发不出去**——本补丁修复这个问题,且不改变你使用网关的方式。
+
+给"只设 DNS 就能接入内网"的网关(**5GPN / privdns-gateway** )的一键补丁。这类网关脚本可能适配在安卓手机上运转正常，但iOS上的 WhatsApp **消息发不出去**——本补丁可一键修复这个问题,且不改变你使用的方式。
 
 ## 一键安装
 
 ```bash
-# 1) 先干跑:只检测你的网关、不做任何改动(推荐先跑这个):
+# 1) 先干跑测测试:只检测你的网关、不做任何改动(推荐先跑这个):
 curl -fsSL https://raw.githubusercontent.com/Loading886/iOS-5GPN-WhatsApp-Patch/main/bootstrap.sh | sudo bash -s -- --detect
 
-# 2) 安装补丁:
+# 2) 一键安装补丁:
 curl -fsSL https://raw.githubusercontent.com/Loading886/iOS-5GPN-WhatsApp-Patch/main/bootstrap.sh | sudo bash
 
 # 卸载(完整还原):
 curl -fsSL https://raw.githubusercontent.com/Loading886/iOS-5GPN-WhatsApp-Patch/main/bootstrap.sh | sudo bash -s -- --uninstall
 ```
 
-想先看代码再运行?克隆下来检查后:
-
-```bash
-git clone https://github.com/Loading886/iOS-5GPN-WhatsApp-Patch && cd iOS-5GPN-WhatsApp-Patch
-sudo ./install.sh --detect    # 干跑
-sudo ./install.sh             # 安装(全程备份、真实 TLS 握手烟雾测试、失败自动回滚)
-sudo ./uninstall.sh           # 完整还原
-```
-
 ## 为什么 WhatsApp 在这些网关上发不出消息
 
-这些项目的原理都一样:你手机的 **DoT DNS** 把"要代理"的域名解析成**网关自己的 IP**,网关再按 **TCP/443 上明文的 TLS SNI** 来转发(用 sniproxy、sing-box 或 HAProxy)。凡是带 SNI 的流量都能覆盖——包括 WhatsApp 的 API(`*.whatsapp.net`)和媒体。
+这些项目的原理都一样:你手机的 **DoT DNS** 把"要代理"的域名解析成**网关自己的 IP**,网关再按 **TCP/443 上明文的 TLS SNI** 来转发(用 sniproxy、sing-box 或 HAProxy)。凡是带 SNI 的流量都能覆盖—。
 
-但 **WhatsApp 的聊天连接根本没有 SNI**。它是直接跑在 TCP/443 上的 Noise 协议握手,没有 TLS 层,所以 SNI 路由器读不到任何主机名。它的首字节是:
+但 **WhatsApp iOS版的聊天链接根本没有 SNI**。它是直接使用特有的 TCP/443 上的 Noise 协议握手,没有 TLS 层,所以 SNI 路由器读不到任何主机名。它的首字节是:
 
 ```
 45 44 00 01   "ED…"   (多设备 edge)
-57 41 06 03   "WA…"   (经典)
+57 41 06 03   "WA…"   (WhatsApp标识)
 ```
 
-网关看到一个无法分类的 443 连接,只能把它丢掉 → 你的消息一直转圈、发送失败(通话/媒体仍然正常,因为它们**带** SNI)。这个问题在全部五个 fork 上都一模一样。
+网关看到一个无法分类的 443 连接,只能把它丢掉 → 你的消息一直转圈、发送失败。
 
-> 补丁具体怎么修、支持哪些 fork、安全性与自动回滚机制等完整细节,见下方英文文档。
+> 补丁具体详情、支持哪些 fork、安全性与自动回滚机制等完整细节,见下方英文文档。
+
 
 ---
 
