@@ -77,8 +77,14 @@ The shim is ~200 lines of dependency-free Python, runs as an unprivileged user, 
 | **Xiuyixx/5GPN-X** | sniproxy | ✅ one-click | relocate sniproxy → loopback; shim on :443. WhatsApp already hijacked. |
 | **Jaydooooooo/5GPN** | sniproxy | ✅ one-click | same as above (it's a wrapper over Xiuyixx). |
 | **lingchenfs1/5gpn** | sniproxy | ✅ one-click | same; installer **verifies** WhatsApp is hijacked and adds a DNS entry if the deployed GFWList lacks it. |
-| **misaka-cpu/privdns-gateway** | sing-box | ✅ one-click | relocate sing-box `:443` inbound → loopback; shim on :443; **adds `whatsapp.net/.com` to `unlock.txt`** (not hijacked by default). |
+| **misaka-cpu/privdns-gateway** | sing-box | ✅ one-click · **live-tested** | sing-box keeps the inbound port as the egress port, so it's relocated to loopback **:443** (not a new port) and the shim binds the interface IP; **adds `whatsapp.net/.com` to `unlock.txt`** (not hijacked by default). |
 | **mora1n/5gws** | HAProxy | ⚠️ `--force-haproxy` | hardest case: it already owns an nft REDIRECT on :443 and explicitly rejects no-SNI. Needs the experimental flag (auto-rollback still applies) or the manual steps below. |
+
+> **Live-tested:** the **sing-box** path (privdns-gateway) and the **sniproxy** path (lingchen/5gpn) were
+> installed via the one-liner on a real Debian 12 deployment and verified end-to-end — WhatsApp's no-SNI
+> ED/WA handshake is diverted to `g.whatsapp.net`, normal SNI fails open to the gateway, DNS is hijacked
+> for clients, and uninstall fully restores the gateway. The HAProxy/5gws path is code-reviewed but not
+> yet live-tested.
 
 > The mechanism is universal; the *integration* is per-host, so the installer **detects then adapts**.
 
@@ -122,10 +128,10 @@ This patch sits in front of all of your :443, so it is built to be reversible an
   to each project's *local supplement* file (`gfwlist-extra-local.txt` / `unlock.txt` / `rules.toml`) so
   re-running is idempotent and the project's weekly list refresh appends rather than clobbers it. If your
   fork regenerates that file wholesale, re-add the entry (or re-run the patch — it's idempotent).
-- **Honesty:** this was built and unit-tested generically (the daemon's classify/fail-open/loop-guard
-  logic is verified), **not** against a live install of each of the five forks. That's exactly why
-  the installer self-validates and auto-rolls-back — so an unforeseen difference on your box fails
-  safe instead of breaking your HTTPS.
+- **Honesty:** the daemon logic is unit-tested (28 cases) and the **sing-box and sniproxy paths are
+  live-tested** end-to-end (install → verify → uninstall) on a real deployment; the HAProxy/5gws path
+  is code-reviewed but not yet live-tested. The installer self-validates with a real TLS handshake and
+  auto-rolls-back, so an unforeseen difference on your box fails safe instead of breaking your HTTPS.
 
 ## Manual steps for mora1n/5gws (HAProxy)
 
