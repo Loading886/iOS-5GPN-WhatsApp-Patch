@@ -17,7 +17,12 @@ while IFS= read -r line; do
 done < <(tac "$ROLLBACK_FILE")
 
 rm -f /usr/local/sbin/wa-patch-uninstall
-if ss -ltnH 'sport = :443' 2>/dev/null | grep -q .; then
+up=0
+for i in 1 2 3 4 5 6 7 8 9 10; do                # a Type=simple listener can take a moment to re-bind :443
+  ss -ltnH 'sport = :443' 2>/dev/null | grep -q . && { up=1; break; }
+  sleep 1
+done
+if [ "$up" = 1 ]; then
   rm -rf "$STATE_DIR"
   echo "[ok] wa-universal-patch removed; a listener is back on :443 (${LISTENER:-your SNI listener}). Gateway restored."
 else
