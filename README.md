@@ -110,8 +110,10 @@ It inserts a tiny **peek-shim** in front of the gateway's :443 listener:
 - **Everything else fails open** — a normal TLS ClientHello, HTTP, an unknown protocol, even a slow
   or failed peek, is spliced straight to the gateway's listener untouched. wa-shim never drops
   normal traffic and never terminates TLS; the handshake stays end-to-end.
-- The installer also makes sure **WhatsApp's domains actually resolve to the gateway** (two of the
-  five forks don't hijack them by default — see the matrix), or the chat socket would never arrive.
+- The installer also makes sure **WhatsApp's domains actually resolve to the gateway** so the chat
+  socket arrives. It first probes — *sourced from inside the client CIDR* — whether `whatsapp.net`
+  already comes back as a gateway IP; if so (e.g. privdns-gateway blackholes all non-CN client queries
+  by default) it **skips the DNS change**, and only adds a rule on forks that don't already hijack it.
 
 The shim is ~200 lines of dependency-free Python, runs as an unprivileged user, and `Restart=always`.
 
@@ -122,7 +124,7 @@ The shim is ~200 lines of dependency-free Python, runs as an unprivileged user, 
 | **Xiuyixx/5GPN-X** | sniproxy | ✅ one-click | relocate sniproxy → loopback; shim on :443. WhatsApp already hijacked. |
 | **Jaydooooooo/5GPN** | sniproxy | ✅ one-click | same as above (it's a wrapper over Xiuyixx). |
 | **lingchenfs1/5gpn** | sniproxy | ✅ one-click | same; installer **verifies** WhatsApp is hijacked and adds a DNS entry if the deployed GFWList lacks it. |
-| **misaka-cpu/privdns-gateway** | sing-box | ✅ one-click · **live-tested** | sing-box keeps the inbound port as the egress port, so it's relocated to loopback **:443** (not a new port) and the shim binds the interface IP; **adds `whatsapp.net/.com` to `unlock.txt`** (not hijacked by default). |
+| **misaka-cpu/privdns-gateway** | sing-box | ✅ one-click · **live-tested** | sing-box keeps the inbound port as the egress port, so it's relocated to loopback **:443** (not a new port) and the shim binds the interface IP. It already blackholes non-CN client queries to the gateway, so WhatsApp is hijacked by default and the **DNS patch is auto-skipped**. |
 | **mora1n/5gws** | HAProxy (behind an nft redirect) | ❌ manual only | **redirect-mode**: 5gws never binds :443 — an nft rule redirects `:443 → HAProxy:18443`. There's no :443 listener to relocate, so the installer **detects this and refuses cleanly** (fails safe, nothing changed). See the manual steps below. |
 
 > **Live-tested:** the **sing-box** path (privdns-gateway) and the **sniproxy** path (lingchen/5gpn) were

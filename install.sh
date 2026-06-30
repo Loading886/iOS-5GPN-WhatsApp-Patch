@@ -176,9 +176,21 @@ detect_multihop(){
 }
 
 WA_DNS_OK=unknown
-check_wa_dns(){  # informational only (the hijack is client-scoped, so the box's own view may differ)
-  local ans; ans="$(timeout 3 getent ahostsv4 "$WA_HOST" 2>/dev/null | awk '{print $1; exit}' || true)"
-  if [ -n "$ans" ] && grep -q "\b$ans\b" <<<"${SELF_IPS//,/ }"; then WA_DNS_OK=yes; else WA_DNS_OK=no; fi
+check_wa_dns(){
+  # Resolve whatsapp.net AS A CLIENT would — sourced from inside the client CIDR — because the gateway's
+  # DNS hijack is client-scoped (the box's own resolver view differs). If it already comes back as a
+  # gateway IP, WhatsApp already reaches the gateway and the DNS patch is unnecessary (several forks, e.g.
+  # privdns-gateway, blackhole ALL non-CN client A-queries to the gateway by default).
+  command -v dig >/dev/null || return 0
+  local gw="${SELF_IPS%%,*}" base ip ans
+  [ -n "$gw" ] || return 0
+  base="${CLIENT_CIDR%/*}"
+  ip="$(printf '%s' "$base" | awk -F. 'NF==4{printf "%s.%s.%s.222",$1,$2,$3}')"
+  [ -n "$ip" ] || return 0
+  ip addr add "$ip/32" dev lo 2>/dev/null || true
+  ans="$(dig +short +time=2 +tries=1 -b "$ip" @"$gw" whatsapp.net A 2>/dev/null | grep -E '^[0-9.]+$' | head -1 || true)"
+  ip addr del "$ip/32" dev lo 2>/dev/null || true
+  if [ -n "$ans" ] && grep -qw "$ans" <<<"${SELF_IPS//,/ }"; then WA_DNS_OK=yes; else WA_DNS_OK=no; fi
 }
 
 pick_free_port(){
@@ -196,7 +208,7 @@ print_detection(){
   printf '  %-18s %s\n' "DNS system"      "${DNS_SYS:-?}${DNS_RULEFILE:+  (rules: $DNS_RULEFILE)}"
   printf '  %-18s %s\n' "gateway IPs"     "${SELF_IPS:-?}"
   printf '  %-18s %s\n' "client range"    "$CLIENT_CIDR"
-  printf '  %-18s %s\n' "WhatsApp hijack" "$WA_DNS_OK (informational)"
+  printf '  %-18s %s\n' "WhatsApp hijack" "$WA_DNS_OK (client-sourced; 'yes' => DNS patch skipped)"
   printf '  %-18s %s\n' "multi-hop exit"  "$MULTIHOP"
   printf '  %-18s %s\n' "shim listen"     "${SHIM_LISTEN:-0.0.0.0}:443"
   printf '  %-18s %s\n' "backend"         "127.0.0.1:${RELOC_PORT:-?}"
@@ -309,6 +321,9 @@ PY
 }
 
 ensure_wa_dns(){
+  if [ "$WA_DNS_OK" = yes ]; then
+    ok "WhatsApp already resolves to the gateway for clients ($DNS_SYS) — no DNS change needed."; return
+  fi
   local appended=0
   case "$DNS_SYS" in
     mosdns|dnsdist)
