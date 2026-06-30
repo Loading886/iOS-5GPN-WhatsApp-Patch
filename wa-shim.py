@@ -346,7 +346,7 @@ async def handle(creader, cwriter):
 
 
 async def main():
-    server = await asyncio.start_server(handle, LISTEN_HOST, LISTEN_PORT)
+    server = await asyncio.start_server(handle, LISTEN_HOST, LISTEN_PORT, backlog=4096)
     log.info("listening %s:%d  backend=%s:%d  wa-edge=%s:%d via resolver=%s  magics=%s  self-ips=%s  allow=%s",
              LISTEN_HOST, LISTEN_PORT, BACKEND_HOST, BACKEND_PORT, WA_HOST, WA_PORT,
              ",".join(RESOLVERS), ",".join(m.hex() for m in KNOWN_MAGIC), ",".join(sorted(SELF_IPS)) or "none",

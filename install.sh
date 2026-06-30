@@ -363,6 +363,7 @@ Environment=WA_SHIM_ALLOW_CIDR=$CLIENT_CIDR,127.0.0.0/8
 ExecStart=$(command -v python3) $SHIM_DST
 Restart=always
 RestartSec=1
+LimitNOFILE=65536
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
@@ -422,8 +423,10 @@ smoke_test(){
   sleep 1
   if journalctl -u wa-shim --since '20 sec ago' --no-pager 2>/dev/null | grep -qE 'WA(\(new-version\))? src='; then
     ok "no-SNI WhatsApp divert works (ED handshake routed to $WA_HOST)."
+    DIVERT_VERIFIED=1
   else
     warn "ED divert not observed locally (resolver/SELF_IPS/egress?) — fail-open path is fine; verify on the phone."
+    DIVERT_VERIFIED=0
   fi
   return 0
 }
@@ -458,7 +461,13 @@ if [ "$LISTENER" = singbox ]; then
   # sing-box's sniff_override keeps the INBOUND port as the egress port (1.12 removed the inbound
   # override_port field), so relocating it to a different port makes it dial <host>:<that-port>.
   # Instead keep it on :443 (loopback) and bind the shim to the interface IP traffic arrives on.
-  IFACE_IP="${WA_SHIM_BIND:-$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1 || true)}"
+  if [ -n "${WA_SHIM_BIND:-}" ]; then
+    IFACE_IP="$WA_SHIM_BIND"
+  else
+    IFACE_IP="$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1 || true)"
+    N_IP4="$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | sort -u | wc -l | tr -d ' ')"
+    [ "${N_IP4:-0}" -le 1 ] || die "this box has multiple global IPv4 addresses ($(ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | paste -sd, -)); the sing-box shim must bind the IP your clients actually reach — re-run with WA_SHIM_BIND=<that-ip>."
+  fi
   [ -n "$IFACE_IP" ] || die "could not determine the interface IPv4 for the sing-box relocation; set WA_SHIM_BIND=<ip>."
   RELOC_PORT=443; SHIM_LISTEN="$IFACE_IP"; SMOKE_TARGET="$IFACE_IP"
 fi
@@ -501,7 +510,12 @@ install_shim
 if smoke_test; then
   trap - ERR
   write_state
-  ok "wa-universal-patch installed. WhatsApp chat should now work on this gateway."
+  if [ "${DIVERT_VERIFIED:-0}" = 1 ]; then
+    ok "wa-universal-patch installed — WhatsApp no-SNI divert VERIFIED working (and normal HTTPS still routes)."
+  else
+    ok "wa-universal-patch installed — normal HTTPS verified through the shim."
+    warn "⚠️  WhatsApp divert could NOT be auto-verified on this box (commonly: the local test source isn't in the client CIDR, or the box can't reach the edge resolver). Usually fine — but CONFIRM by sending a WhatsApp message from a phone behind the gateway, and watch: journalctl -u wa-shim -f"
+  fi
   echo
   echo "  verify on the phone:     send a WhatsApp message (no full-VPN)."
   echo "  watch diverts:           journalctl -u wa-shim -f"
