@@ -88,6 +88,11 @@ command -v ss >/dev/null || die "need 'ss' (iproute2)."
 command -v python3 >/dev/null || die "need python3."
 command -v tac >/dev/null || die "need 'tac' (coreutils)."
 
+# clean up the transient DNS-probe address (added to lo in check_wa_dns) on ANY exit/interruption
+PROBE_TMP_IP=""
+_cleanup_probe(){ [ -n "${PROBE_TMP_IP:-}" ] && ip addr del "$PROBE_TMP_IP" dev lo 2>/dev/null || true; }
+trap _cleanup_probe EXIT
+
 # ---- detection ----------------------------------------------------------------------------------
 LISTENER="" LISTENER_SVC="" LISTENER_CFG="" LISTENER_PID=""
 detect_listener443(){
@@ -187,9 +192,9 @@ check_wa_dns(){
   base="${CLIENT_CIDR%/*}"
   ip="$(printf '%s' "$base" | awk -F. 'NF==4{printf "%s.%s.%s.222",$1,$2,$3}')"
   [ -n "$ip" ] || return 0
-  ip addr add "$ip/32" dev lo 2>/dev/null || true
+  ip addr add "$ip/32" dev lo 2>/dev/null || true; PROBE_TMP_IP="$ip/32"
   ans="$(dig +short +time=2 +tries=1 -b "$ip" @"$gw" whatsapp.net A 2>/dev/null | grep -E '^[0-9.]+$' | head -1 || true)"
-  ip addr del "$ip/32" dev lo 2>/dev/null || true
+  ip addr del "$ip/32" dev lo 2>/dev/null || true; PROBE_TMP_IP=""
   if [ -n "$ans" ] && grep -qw "$ans" <<<"${SELF_IPS//,/ }"; then WA_DNS_OK=yes; else WA_DNS_OK=no; fi
 }
 
@@ -326,11 +331,16 @@ ensure_wa_dns(){
   fi
   local appended=0
   case "$DNS_SYS" in
-    mosdns|dnsdist)
-      [ "$DNS_SYS" = mosdns ] && { [ -f "$DNS_RULEFILE" ] || { warn "mosdns unlock list $DNS_RULEFILE missing; skipping DNS patch."; return; }; }
+    dnsdist)
       grep -qF "$WA_MARK" "$DNS_RULEFILE" 2>/dev/null && { ok "WhatsApp DNS entry already present ($DNS_RULEFILE)."; return; }
       backup_restore_undo "$DNS_RULEFILE" "$DNS_RELOAD"
       printf '%s\nwhatsapp.net\nwhatsapp.com\n' "$WA_MARK" >> "$DNS_RULEFILE"; appended=1
+      ;;
+    mosdns)
+      [ -f "$DNS_RULEFILE" ] || { warn "mosdns unlock list $DNS_RULEFILE missing; skipping DNS patch."; return; }
+      grep -qF "$WA_MARK" "$DNS_RULEFILE" 2>/dev/null && { ok "WhatsApp DNS entry already present ($DNS_RULEFILE)."; return; }
+      backup_restore_undo "$DNS_RULEFILE" "$DNS_RELOAD"
+      printf '%s\ndomain:whatsapp.net\ndomain:whatsapp.com\n' "$WA_MARK" >> "$DNS_RULEFILE"; appended=1   # mosdns domain-set convention
       ;;
     smartdns)
       [ -f "$DNS_RULEFILE" ] || { warn "5gws rules $DNS_RULEFILE missing; skipping DNS patch."; return; }
@@ -350,7 +360,18 @@ TOML
       ;;
     *) warn "unknown DNS system; CANNOT auto-point WhatsApp at the gateway. Ensure whatsapp.net/whatsapp.com resolve to ${SELF_IPS%%,*} for your clients."; return ;;
   esac
-  [ "$appended" = 1 ] && { eval "$DNS_RELOAD" >/dev/null 2>&1 || warn "DNS reload failed; reload $DNS_SYS manually."; ok "pointed WhatsApp at the gateway ($DNS_RULEFILE)."; }
+  [ "$appended" = 1 ] || return 0
+  eval "$DNS_RELOAD" >/dev/null 2>&1 || warn "DNS reload failed; reload $DNS_SYS manually."
+  # VERIFY the edit actually points WhatsApp at the gateway for clients — never ship an inert/wrong DNS edit.
+  sleep 2; check_wa_dns
+  if [ "$WA_DNS_OK" = yes ]; then
+    ok "pointed WhatsApp at the gateway ($DNS_RULEFILE) — verified resolving to the gateway for clients."
+  elif [ "$WA_DNS_OK" = no ]; then
+    warn "the DNS edit did NOT take effect (wrong file/format for this $DNS_SYS, or rules not reloaded) — rolling back the DNS change and aborting."
+    return 1
+  else
+    warn "pointed WhatsApp at the gateway ($DNS_RULEFILE) but could NOT verify it (install dig/dnsutils to enable) — if WhatsApp chat fails, confirm whatsapp.net resolves to ${SELF_IPS%%,*} for your clients."
+  fi
 }
 
 install_shim(){

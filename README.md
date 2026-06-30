@@ -192,21 +192,30 @@ up by hand (HAProxy stays on :18443; the shim takes the redirect's place on :443
    domain_suffix = ["whatsapp.net", "whatsapp.com"]
    ```
    then `systemctl restart 5gws-smartdns`.
-2. **Remove the :443 redirect** so client :443 reaches the shim instead of HAProxy directly:
+2. **Remove ONLY the TCP/443 redirect** so client TCP :443 reaches the shim. **KEEP the UDP/443 redirect** —
+   the shim is TCP-only, and that rule is 5gws's QUIC/STUN path (`quicgw`); deleting it breaks UDP/QUIC.
    ```bash
-   nft -a list chain inet fivegws prerouting          # find the handle of each tcp/udp dport 443 redirect rule
-   nft delete rule inet fivegws prerouting handle <N> # repeat for the tcp and udp :443 rules
+   nft -a list chain inet fivegws prerouting          # find the handle of the *tcp* dport 443 redirect rule ONLY
+   nft delete rule inet fivegws prerouting handle <N> # the TCP one — do NOT delete the 'udp dport 443' rule
    ```
-3. **Run the shim on :443**, forwarding non-WhatsApp to HAProxy's real port (18443). The installer refuses
+3. **Re-scope :443 to your clients (REQUIRED — security).** With the redirect gone, 5gws's input chain is
+   `policy accept`, so a shim on :443 would fail-open *any* internet source's SNI through HAProxy — an open
+   proxy. Drop non-client :443 first:
+   ```bash
+   nft insert rule inet fivegws input iifname "<iface>" ip saddr != <client-cidr> tcp dport 443 drop
+   ```
+4. **Run the shim on :443**, forwarding non-WhatsApp to HAProxy's real port (18443). The installer refuses
    redirect-mode, so run the daemon directly (wrap it in a systemd unit for persistence):
    ```bash
    sudo WA_SHIM_PORT=443 WA_SHIM_BACKEND=127.0.0.1:18443 \
         WA_SHIM_ALLOW_CIDR=<client-cidr>,127.0.0.0/8 WA_SHIM_SELF_IPS=<gateway-ip> \
         python3 wa-shim.py
    ```
-   5gws's input chain is `policy accept`, so the shim on :443 gets client traffic with no extra firewall rule.
 
-> Native redirect-mode auto-support may come later; for now the installer fails safe on 5gws and points here.
+> **This is a RUNTIME change.** 5gws renders its nft from config, so any later `5gws apply` / reconfigure /
+> service restart **rebuilds the TCP/443 redirect** and the shim silently stops receiving traffic. Re-do
+> steps 2–4 after any 5gws apply, or automate it (a systemd oneshot/path unit that, after `5gws-*` restarts,
+> re-deletes the TCP/443 redirect, re-adds the drop rule, and restarts the shim).
 
 > **Note:** there is also an experimental `--force-haproxy` path, but it is for the *different* case of a
 > gateway that binds **HAProxy directly on :443** (none of the five forks does this; it's untested). It is
