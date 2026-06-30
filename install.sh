@@ -69,7 +69,12 @@ do_rollback(){
   if systemctl is-active --quiet wa-shim 2>/dev/null; then
     die "ROLLBACK INCOMPLETE: wa-shim is still active on :443 — run 'systemctl disable --now wa-shim', then restart your SNI listener (${LISTENER_SVC:-sniproxy|sing-box|haproxy})."
   fi
-  if ss -ltnH 'sport = :443' 2>/dev/null | grep -q .; then
+  local up=0 i
+  for i in 1 2 3 4 5 6 7 8 9 10; do                # a Type=simple listener can take a moment to re-bind :443
+    ss -ltnH 'sport = :443' 2>/dev/null | grep -q . && { up=1; break; }
+    sleep 1
+  done
+  if [ "$up" = 1 ]; then
     rm -f "$ROLLBACK_FILE"
     warn "rollback complete — a listener is back on :443; gateway restored."
   else
@@ -178,7 +183,8 @@ print_detection(){
   printf '  %-18s %s\n' "client range"    "$CLIENT_CIDR"
   printf '  %-18s %s\n' "WhatsApp hijack" "$WA_DNS_OK (informational)"
   printf '  %-18s %s\n' "multi-hop exit"  "$MULTIHOP"
-  printf '  %-18s %s\n' "backend port"    "${RELOC_PORT:-(auto)}"
+  printf '  %-18s %s\n' "shim listen"     "${SHIM_LISTEN:-0.0.0.0}:443"
+  printf '  %-18s %s\n' "backend"         "127.0.0.1:${RELOC_PORT:-?}"
   printf '  %-18s %s\n' "wa-edge resolver" "${WA_RESOLVER:-(auto 1.1.1.1,8.8.8.8)}"
   echo "───────────────────────────────"
 }
@@ -332,6 +338,7 @@ Wants=network-online.target
 Type=simple
 User=$SHIM_USER
 AmbientCapabilities=CAP_NET_BIND_SERVICE
+Environment=WA_SHIM_LISTEN=$SHIM_LISTEN
 Environment=WA_SHIM_PORT=443
 Environment=WA_SHIM_BACKEND=127.0.0.1:$RELOC_PORT
 Environment=WA_SHIM_WA_HOST=$WA_HOST
@@ -375,12 +382,15 @@ smoke_test(){
   systemctl is-active --quiet wa-shim || { warn "wa-shim not active"; journalctl -u wa-shim -n 15 --no-pager; return 1; }
   journalctl -u wa-shim -n 5 --no-pager 2>/dev/null | grep -qi Traceback && { warn "wa-shim crashed (traceback)"; return 1; }
   ss -ltnH 'sport = :443' | grep -q . || { warn ":443 not listening after install"; return 1; }
-  ss -ltnH "sport = :$RELOC_PORT" | grep -q . || { warn "relocated backend not on :$RELOC_PORT"; return 1; }
-  # (a) MANDATORY: normal SNI still routes phone->shim->backend->origin (real TLS handshake, stdlib)
-  if _tls_probe 127.0.0.1; then
+  ss -ltnH | grep -q "127.0.0.1:$RELOC_PORT " || { warn "relocated backend not on 127.0.0.1:$RELOC_PORT"; return 1; }
+  # (a) MANDATORY: normal SNI still routes phone->shim->backend->origin (real TLS handshake, stdlib).
+  #     Retry a few times — a Type=simple listener may still be warming up right after its restart.
+  local ok_a=0 i
+  for i in 1 2 3; do _tls_probe "$SMOKE_TARGET" && { ok_a=1; break; }; sleep 2; done
+  if [ "$ok_a" = 1 ]; then
     ok "SNI fail-open path works (web.whatsapp.com handshakes through shim->backend)."
   else
-    warn "SNI handshake through the shim FAILED — backend routing is broken; rolling back."
+    warn "SNI handshake through the shim ($SMOKE_TARGET:443) FAILED — backend routing is broken; rolling back."
     return 1
   fi
   # (a2) for HAProxy/5gws: prove external :443 isn't INPUT-dropped (loopback can pass while public drops)
@@ -393,7 +403,7 @@ smoke_test(){
   fi
   # (b) BEST-EFFORT: a no-SNI ED connection is diverted (depends on outbound resolver reachability,
   #     which is orthogonal to whether the shim safely fronts :443 — so a miss only WARNS, never rolls back)
-  printf 'ED\x00\x01smoke' | timeout 5 bash -c 'cat >/dev/tcp/127.0.0.1/443' 2>/dev/null || true
+  printf 'ED\x00\x01smoke' | timeout 5 bash -c "cat >/dev/tcp/$SMOKE_TARGET/443" 2>/dev/null || true
   sleep 1
   if journalctl -u wa-shim --since '20 sec ago' --no-pager 2>/dev/null | grep -qE 'WA(\(new-version\))? src='; then
     ok "no-SNI WhatsApp divert works (ED handshake routed to $WA_HOST)."
@@ -428,6 +438,15 @@ detect_client_cidr
 detect_multihop
 check_wa_dns
 [ -n "$RELOC_PORT" ] || RELOC_PORT="$(pick_free_port)"
+SHIM_LISTEN="0.0.0.0"; SMOKE_TARGET="127.0.0.1"
+if [ "$LISTENER" = singbox ]; then
+  # sing-box's sniff_override keeps the INBOUND port as the egress port (1.12 removed the inbound
+  # override_port field), so relocating it to a different port makes it dial <host>:<that-port>.
+  # Instead keep it on :443 (loopback) and bind the shim to the interface IP traffic arrives on.
+  IFACE_IP="${WA_SHIM_BIND:-$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1 || true)}"
+  [ -n "$IFACE_IP" ] || die "could not determine the interface IPv4 for the sing-box relocation; set WA_SHIM_BIND=<ip>."
+  RELOC_PORT=443; SHIM_LISTEN="$IFACE_IP"; SMOKE_TARGET="$IFACE_IP"
+fi
 print_detection
 
 # guard rails
