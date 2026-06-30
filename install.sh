@@ -444,7 +444,6 @@ EOF
 }
 
 # ================================ main ===========================================================
-mkdir -p "$STATE_DIR" "$BACKUP_DIR"
 detect_listener443
 detect_firewall
 detect_redirect_mode
@@ -486,6 +485,7 @@ fi
 if [ "$DETECT_ONLY" = 1 ]; then ok "--detect only: no changes made."; exit 0; fi
 [ -f "$STATE_FILE" ] && die "already installed (per $STATE_FILE). Run ./uninstall.sh first, then re-install."
 
+mkdir -p "$STATE_DIR" "$BACKUP_DIR"   # only once we're actually going to install (refusals leave nothing behind)
 : > "$ROLLBACK_FILE"
 trap 'do_rollback; die "install failed; rolled back."' ERR
 
